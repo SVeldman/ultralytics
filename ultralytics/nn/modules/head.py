@@ -34,16 +34,33 @@ class Detect(nn.Module):
         super().__init__()
         self.nc = nc  # number of classes
         self.nl = len(ch)  # number of detection layers
+                    ## number of detection layers is determined by length of "ch" tuple
+                    ## The number of channels in each detection layer (ch) represents the depth of the feature maps.
+                    ## Deeper feature maps (i.e., more channels) can capture more complex patterns and details in the input images.
+                    ## Each detection layer processes feature maps with a specific number of channels.
+                    ## Multiple detection layers allow the model to make predictions at different scales, 
+                    ## improving its ability to detect objects of various sizes.
         self.reg_max = 16  # DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
+                    ## Regression Maximum is used to determine number of channels for Distributed Focal Loss 
+                    ## DFL module helps refine the bounding box coordinates
+                        ## The number of channels for the DFL module is calculated as ch[0] // 16.
+                        ## This means that the first element of the ch tuple (which represents the number of channels in the first 
+                        ## detection layer) is divided by 16 to determine the number of channels for the DFL module.
+
         self.no = nc + self.reg_max * 4  # number of outputs per anchor
+                    ## number of outputs (predictions) per anchor box is determined by number of classes and number of DFL regression channels
         self.stride = torch.zeros(self.nl)  # strides computed during build
         c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
+                    ## c2 is the number of channels in the second convolutional layer (regression layer/module)
+                    ## c3 is the number of channels in the third convolutional layer (classification layer/module)
         self.cv2 = nn.ModuleList(
             nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch
-        )
-        self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch)
-        self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
+        )           ## builds the sequence of convolutional layers for the regression module
 
+        self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch)
+                    ## builds the sequence of convolutional layers for the classification module
+        self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
+                    ## Builds DFL (Distributed Focal Loss) module, which helps refine the bounding box coordinates
         if self.end2end:
             self.one2one_cv2 = copy.deepcopy(self.cv2)
             self.one2one_cv3 = copy.deepcopy(self.cv3)
@@ -55,11 +72,17 @@ class Detect(nn.Module):
 
         for i in range(self.nl):
             x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
+                    ## for each detection layer, concatenates the output of the regression and classification modules
         if self.training:  # Training path
             return x
+                    ## If model is running in training mode, returns the concatenated output of the regression and classification modules
         y = self._inference(x)
+                    ## If model is running in inference mode, calls the _inference method to  process the concatenated feature maps (x) and 
+                    ## generate the final predictions (y).
         return y if self.export else (y, x)
-
+                    ## If the model is in export mode (self.export is True), it returns only the predictions (y). Otherwise, it returns a 
+                    ## tuple of the predictions (y) and the concatenated feature maps (x).
+    
     def forward_end2end(self, x):
         """
         Performs forward pass of the v10Detect module.
@@ -88,16 +111,23 @@ class Detect(nn.Module):
         """Decode predicted bounding boxes and class probabilities based on multiple-level feature maps."""
         # Inference path
         shape = x[0].shape  # BCHW
+                ## Shape is determined based on shape of first feature map (x[0]); Batch, Channels, Height, Width
         x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2)
+                ## The feature maps are reshaped and concatenated along the third dimension.
         if self.dynamic or self.shape != shape:
             self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
             self.shape = shape
+                ## If dynamic is True or the shape of the feature maps has changed, the anchor boxes and strides are recomputed.
+                ## make_anchors function is defined in utils, generates anchor boxes based on the feature maps and stride values.
 
         if self.export and self.format in {"saved_model", "pb", "tflite", "edgetpu", "tfjs"}:  # avoid TF FlexSplitV ops
             box = x_cat[:, : self.reg_max * 4]
             cls = x_cat[:, self.reg_max * 4 :]
+                ## Check: If the model is in export mode and the format is one of the specified formats, the feature maps are split
+                ## manually to avoid TensorFlow FlexSplitV operations.
         else:
             box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
+                ## The concatenated feature maps are split into bounding box predictions (box) and class predictions (cls).
 
         if self.export and self.format in {"tflite", "edgetpu"}:
             # Precompute normalization factor to increase numerical stability
@@ -107,10 +137,14 @@ class Detect(nn.Module):
             grid_size = torch.tensor([grid_w, grid_h, grid_w, grid_h], device=box.device).reshape(1, 4, 1)
             norm = self.strides / (self.stride[0] * grid_size)
             dbox = self.decode_bboxes(self.dfl(box) * norm, self.anchors.unsqueeze(0) * norm[:, :2])
+                ## Additional processing is done if the model is in export mode and the format is TFLite or EdgeTPU
         else:
             dbox = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
+                ## decode_bboxes (see method below) is used to decode the bounding box predictions based on the anchor 
+                ## boxes and strides.
 
         return torch.cat((dbox, cls.sigmoid()), 1)
+                ## concatenates the decoded bounding boxes and class predictions and returns the result
 
     def bias_init(self):
         """Initialize Detect() biases, WARNING: requires stride availability."""
@@ -124,11 +158,14 @@ class Detect(nn.Module):
             for a, b, s in zip(m.one2one_cv2, m.one2one_cv3, m.stride):  # from
                 a[-1].bias.data[:] = 1.0  # box
                 b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
+                ## initializes biases for the detect module, which helps ensure model starts with reasonable initial 
+                ## values for the bounding box and class predictions. 
 
     def decode_bboxes(self, bboxes, anchors):
         """Decode bounding boxes."""
         return dist2bbox(bboxes, anchors, xywh=not self.end2end, dim=1)
-
+                ## calls dist2bbox function from utils, which converts distance vectors relative to anchor points into bounding box coordinates
+    
     @staticmethod
     def postprocess(preds: torch.Tensor, max_det: int, nc: int = 80):
         """
@@ -152,7 +189,8 @@ class Detect(nn.Module):
         scores, index = scores.flatten(1).topk(min(max_det, anchors))
         i = torch.arange(batch_size)[..., None]  # batch indices
         return torch.cat([boxes[i, index // nc], scores[..., None], (index % nc)[..., None].float()], dim=-1)
-
+                ## processes the raw predictions from a YOLO model to extract the bounding boxes and class probabilities.
+                ## This includes selecting the top predictions for each anchor (both box and class predictions) (Non-Max Suppression)
 
 class Segment(Detect):
     """YOLOv8 Segment head for segmentation models."""
@@ -215,11 +253,16 @@ class Pose(Detect):
     def __init__(self, nc=80, kpt_shape=(17, 3), ch=()):
         """Initialize YOLO network with default parameters and Convolutional Layers."""
         super().__init__(nc, ch)
-        self.kpt_shape = kpt_shape  # number of keypoints, number of dims (2 for x,y or 3 for x,y,visible)
+        self.kpt_shape = kpt_shape  # number of keypoints, number of dims (2 for x,y or 3 for x,y,visible)      
         self.nk = kpt_shape[0] * kpt_shape[1]  # number of keypoints total
-
+                ## default keypoints shape is (17, 3), which indicates 17 keypoints with 3 dimensions each (x,y,visibility)
+                ## visibility indicates whether the keypoint is visible or not (can be occluded or outside the frame)
         c4 = max(ch[0] // 4, self.nk)
+                ## Determines the number of channels for the convolutional layers used for keypoint prediction. It takes the maximum of
+                ## one-fourth of the first input channel (ch[0] // 4) and the total number of keypoints (self.nk). This ensures that the number 
+                ## of channels is sufficient for processing the keypoints.
         self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, self.nk, 1)) for x in ch)
+                ## Builds the sequence of convolutional layers comprising the module for processing keypoints
 
     def forward(self, x):
         """Perform forward pass through YOLO model and return predictions."""
@@ -230,6 +273,8 @@ class Pose(Detect):
             return x, kpt
         pred_kpt = self.kpts_decode(bs, kpt)
         return torch.cat([x, pred_kpt], 1) if self.export else (torch.cat([x[0], pred_kpt], 1), (x[1], kpt))
+                ## Returns the keypoint predictions that are the result of the cv4 module, along with the bounding box 
+                ## and class predictions generated by the Detect.forward method. If the model is in training mode
 
     def kpts_decode(self, bs, kpts):
         """Decodes keypoints."""
@@ -240,6 +285,12 @@ class Pose(Detect):
             if ndim == 3:
                 a = torch.cat((a, y[:, :, 2:3].sigmoid()), 2)
             return a.view(bs, self.nk, -1)
+                ## Specific workflow for handling decoding in export mode:
+                        ## Reshapes the keypoints tensor kpts to match the keypoint shape.
+                        ## Adjusts the x and y coordinates using the anchors and strides.
+                        ## If the keypoints have a third dimension (e.g., visibility), applies a sigmoid activation.
+                        ## Returns the adjusted keypoints tensor.
+
         else:
             y = kpts.clone()
             if ndim == 3:
@@ -247,6 +298,11 @@ class Pose(Detect):
             y[:, 0::ndim] = (y[:, 0::ndim] * 2.0 + (self.anchors[0] - 0.5)) * self.strides
             y[:, 1::ndim] = (y[:, 1::ndim] * 2.0 + (self.anchors[1] - 0.5)) * self.strides
             return y
+                ## Non-export mode:
+                        ## Clones the keypoints tensor kpts to avoid modifying the original tensor.
+                        ## If the keypoints have a third dimension (e.g., visibility), applies a sigmoid activation.
+                        ## Adjusts the x and y coordinates using the anchors and strides.
+                        ## Returns the adjusted keypoints tensor.
 
 
 class Classify(nn.Module):

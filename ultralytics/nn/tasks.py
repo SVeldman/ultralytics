@@ -87,6 +87,7 @@ except ImportError:
 
 
 class BaseModel(nn.Module):
+                ## Worth noting that the BaseModel class does not have a constructor (__init__) method*******************************
     """The BaseModel class serves as a base class for all the models in the Ultralytics YOLO family."""
 
     def forward(self, x, *args, **kwargs):
@@ -106,6 +107,7 @@ class BaseModel(nn.Module):
         if isinstance(x, dict):  # for cases of training and validating while training.
             return self.loss(x, *args, **kwargs)
         return self.predict(x, *args, **kwargs)
+
 
     def predict(self, x, profile=False, visualize=False, augment=False, embed=None):
         """
@@ -142,16 +144,22 @@ class BaseModel(nn.Module):
         for m in self.model:
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
-            if profile:
+                    ## if the current layer is not directly connected to the previous layer, directs which previous layers to take input from  if profile:
                 self._profile_one_layer(m, x, dt)
+                    ## profile computation time
             x = m(x)  # run
+                    ## run the current layer
             y.append(x if m.i in self.save else None)  # save output
+                    ## save the output of the current layer if it is a save layer
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
+                    ## visualize and save the feature maps of the current layer/module
             if embed and m.i in embed:
                 embeddings.append(nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # flatten
                 if m.i == max(embed):
                     return torch.unbind(torch.cat(embeddings, 1), dim=0)
+                    ## If embed is not None and the layer index m.i is in embed, appends the flattened output to embeddings. If the current 
+                    ## layer index is the maximum in embed, returns the concatenated embeddings (feature vectors).
         return x
 
     def _predict_augment(self, x):
@@ -300,12 +308,17 @@ class DetectionModel(BaseModel):
         """Initialize the YOLOv8 detection model with the given config and parameters."""
         super().__init__()
         self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)  # cfg dict
+                ## This line loads the model configuration from a dictionary or a YAML file.
+                ## If cfg is a dictionary, it is used directly; otherwise, it is loaded from a YAML file using yaml_model_load.
+
         if self.yaml["backbone"][0][2] == "Silence":
             LOGGER.warning(
                 "WARNING ⚠️ YOLOv9 `Silence` module is deprecated in favor of nn.Identity. "
                 "Please delete local *.pt file and re-download the latest model checkpoint."
             )
             self.yaml["backbone"][0][2] = "nn.Identity"
+                ## This block checks if the (deprecated) Silence module is used in the backbone and replaces 
+                ## it with nn.Identity, issuing a warning to the user.
 
         # Define model
         ch = self.yaml["ch"] = self.yaml.get("ch", ch)  # input channels
@@ -316,7 +329,14 @@ class DetectionModel(BaseModel):
         self.names = {i: f"{i}" for i in range(self.yaml["nc"])}  # default names dict
         self.inplace = self.yaml.get("inplace", True)
         self.end2end = getattr(self.model[-1], "end2end", False)
-
+                ## This block sets up the model architecture:
+                    ## ch is set to the number of input channels.
+                    ## If the number of classes (nc) is provided and different from the YAML configuration, it overrides the YAML value.
+                    ## parse_model is called to build the model and save the list of layers.
+                    ## self.names is a dictionary mapping class indices (prediction classes) to default names.
+                    ## self.inplace and self.end2end are set based on the YAML configuration.
+                        ## end2end is from v10; refers to whether the model is configured to process and image directly and produce the final model outputs, 
+                        ## without requiring additional post-processing steps. This is typically an attribute defined in the last alyer of a model.
         # Build strides
         m = self.model[-1]  # Detect()
         if isinstance(m, Detect):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetect
@@ -334,12 +354,19 @@ class DetectionModel(BaseModel):
             m.bias_init()  # only run once
         else:
             self.stride = torch.Tensor([32])  # default stride for i.e. RTDETR
+                ## This block sets up the stride for the detection layer:
+                    ## m is the last layer of the model, which is expected to be a Detect layer or its subclass.
+                    ## If m is an instance of Detect, it calculates the stride by performing a forward pass with a dummy input tensor.
+                    ## The stride is stored in self.stride, and m.bias_init() is called to initialize biases.
+                    ## If m is not a Detect instance, a default stride of 32 is used.
 
         # Init weights, biases
         initialize_weights(self)
         if verbose:
             self.info()
             LOGGER.info("")
+                ## This block initializes the weights and biases of the model using the initialize_weights function.
+                ## If verbose is True, it prints model information using self.info() and logs an empty line.
 
     def _predict_augment(self, x):
         """Perform augmentations on input image x and return augmented inference and train outputs."""
@@ -416,14 +443,20 @@ class PoseModel(DetectionModel):
         """Initialize YOLOv8 Pose model."""
         if not isinstance(cfg, dict):
             cfg = yaml_model_load(cfg)  # load model YAML
+                ## If cfg is not a dictionary, it is assumed to be a path to a YAML file, 
+                ## and the yaml_model_load function is used to load the configuration from the file.
         if any(data_kpt_shape) and list(data_kpt_shape) != list(cfg["kpt_shape"]):
             LOGGER.info(f"Overriding model.yaml kpt_shape={cfg['kpt_shape']} with kpt_shape={data_kpt_shape}")
             cfg["kpt_shape"] = data_kpt_shape
+                ## If data_kpt_shape is provided and differs from the keypoint shape in the configuration, 
+                ## it overrides the keypoint shape in the configuration and logs this change.
         super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
+                ## Call __init__ of the parent class (DetectionModel), inheriting all of its attributes and methods
 
     def init_criterion(self):
         """Initialize the loss criterion for the PoseModel."""
         return v8PoseLoss(self)
+                ## Assigns pose-specific loss function to the last layer of the model.
 
 
 class ClassificationModel(BaseModel):
